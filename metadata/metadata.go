@@ -728,12 +728,21 @@ func (signed *RootType) AddKey(key *Key, role string) error {
 	if err != nil {
 		return err
 	}
+	alreadyExists, err := keyStoreConflict(signed.Keys, keyID, key)
+	if err != nil {
+		return err
+	}
+	if signed.Keys == nil {
+		return &ErrValue{Msg: "keys must not be nil"}
+	}
 	// add keyID to role
 	if !slices.Contains(signed.Roles[role].KeyIDs, keyID) {
 		signed.Roles[role].KeyIDs = append(signed.Roles[role].KeyIDs, keyID)
 	}
 	// update Keys
-	signed.Keys[keyID] = key // TODO: should we check if we don't accidentally override an existing keyID with another key value?
+	if !alreadyExists {
+		signed.Keys[keyID] = key
+	}
 	return nil
 }
 
@@ -788,35 +797,84 @@ func (signed *TargetsType) AddKey(key *Key, role string) error {
 	// standard delegated roles
 	if signed.Delegations.Roles != nil {
 		// loop through all delegated roles
-		isDelegatedRole := false
 		for i, d := range signed.Delegations.Roles {
 			// if role is found
 			if d.Name == role {
-				isDelegatedRole = true
-				// add key if keyID is not already part of keyIDs for that role
+				if signed.Delegations.Keys == nil {
+					return &ErrValue{Msg: "keys must not be nil"}
+				}
+				alreadyExists, err := keyStoreConflict(signed.Delegations.Keys, keyID, key)
+				if err != nil {
+					return err
+				}
+				// add keyID to the role if it is not already present
 				if !slices.Contains(d.KeyIDs, keyID) {
 					signed.Delegations.Roles[i].KeyIDs = append(signed.Delegations.Roles[i].KeyIDs, keyID)
-					signed.Delegations.Keys[keyID] = key // TODO: should we check if we don't accidentally override an existing keyID with another key value?
-					return nil
 				}
-				log.Info("Delegated role already has keyID", "role", role, "ID", keyID)
+				// update Keys
+				if !alreadyExists {
+					signed.Delegations.Keys[keyID] = key
+				}
+				return nil
 			}
 		}
-		if !isDelegatedRole {
-			return &ErrValue{Msg: fmt.Sprintf("delegated role %s doesn't exist", role)}
-		}
+		return &ErrValue{Msg: fmt.Sprintf("delegated role %s doesn't exist", role)}
 	} else if signed.Delegations.SuccinctRoles != nil {
-		// add key if keyID is not already part of keyIDs for the SuccinctRoles role
+		if signed.Delegations.Keys == nil {
+			return &ErrValue{Msg: "keys must not be nil"}
+		}
+		alreadyExists, err := keyStoreConflict(signed.Delegations.Keys, keyID, key)
+		if err != nil {
+			return err
+		}
+		// add keyID if it is not already part of keyIDs for the SuccinctRoles role
 		if !slices.Contains(signed.Delegations.SuccinctRoles.KeyIDs, keyID) {
 			signed.Delegations.SuccinctRoles.KeyIDs = append(signed.Delegations.SuccinctRoles.KeyIDs, keyID)
-			signed.Delegations.Keys[keyID] = key // TODO: should we check if we don't accidentally override an existing keyID with another key value?
-			return nil
 		}
-		log.Info("SuccinctRoles role already has keyID", "ID", keyID)
-
+		// update Keys
+		if !alreadyExists {
+			signed.Delegations.Keys[keyID] = key
+		}
+		return nil
 	}
-	signed.Delegations.Keys[keyID] = key // TODO: should we check if we don't accidentally override an existing keyID with another key value?
-	return nil
+	return &ErrValue{Msg: fmt.Sprintf("delegated role %s doesn't exist", role)}
+}
+
+// keyStoreConflict reports whether keyID is already present in keys. If an
+// existing key is found, it must have the same canonical representation as the
+// candidate key. A nil key stored under keyID is treated as absent.
+func keyStoreConflict(keys map[string]*Key, keyID string, key *Key) (bool, error) {
+	existing, ok := keys[keyID]
+	if !ok || existing == nil {
+		return false, nil
+	}
+	same, err := keysHaveEqualCanonicalForm(existing, key)
+	if err != nil {
+		return false, fmt.Errorf("error comparing key with id %s: %w", keyID, err)
+	}
+	if !same {
+		return true, &ErrValue{Msg: fmt.Sprintf("keyID conflict: key with id %s already exists with a different key value", keyID)}
+	}
+	return true, nil
+}
+
+// keysHaveEqualCanonicalForm reports whether two keys have the same canonical representation.
+// The cached ID is not part of the representation, so keys loaded from
+// metadata and freshly constructed keys compare equal when their key material
+// is the same.
+func keysHaveEqualCanonicalForm(a, b *Key) (bool, error) {
+	if a == nil || b == nil {
+		return a == b, nil
+	}
+	aCanonical, err := cjson.EncodeCanonical(a)
+	if err != nil {
+		return false, err
+	}
+	bCanonical, err := cjson.EncodeCanonical(b)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(aCanonical, bCanonical), nil
 }
 
 // RevokeKey revokes key from delegated role "role" and updates the delegations key store
